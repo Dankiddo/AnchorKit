@@ -1,130 +1,138 @@
-use super::*;
-use soroban_sdk::{testutils::{Address as _, Ledger as _, LedgerInfo}, symbol_short, Address, Env, Symbol, String};
-use crate::domain_validator::validate_anchor_domain;
-use crate::errors::{AnchorKitError, ErrorCode};
+#![cfg(test)]
+
+use soroban_sdk::{
+    testutils::Address as _,
+    symbol_short, Address, Env, String, Symbol,
+};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+
+use crate::contract::{AnchorKitContract, AnchorKitContractClient};
+use crate::sep10_test_util::register_attestor_with_sep10;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn make_env() -> Env {
+    let env = Env::default();
+    env.mock_all_auths();
+    env
+}
+
+fn setup(env: &Env) -> (AnchorKitContractClient, Address, Address, SigningKey) {
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let attestor = Address::generate(env);
+    client.initialize(&admin, &100_u64, &None, &None);
+    let sk = SigningKey::generate(&mut OsRng);
+    register_attestor_with_sep10(env, &client, &attestor, &admin, &sk);
+    (client, admin, attestor, sk)
+}
+
+/// Returns the last published event for the given 2-symbol topic prefix.
+fn assert_last_event(env: &Env, topic0: Symbol, topic1: Symbol) {
+    let events = env.events().all();
+    assert!(
+        !events.is_empty(),
+        "expected at least one event to have been published"
+    );
+    let (_publisher, topics, _data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(topics.len(), 2, "event must have exactly two topic symbols");
+    assert_eq!(
+        Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap(),
+        topic0,
+        "first topic mismatch"
+    );
+    assert_eq!(
+        Symbol::try_from_val(env, &topics.get(1).unwrap()).unwrap(),
+        topic1,
+        "second topic mismatch"
+    );
+}
+
+fn assert_event_count(env: &Env, expected: usize) {
+    assert_eq!(env.events().all().len(), expected, "unexpected event count");
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_register_attestor_emits_registered_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
+    let env = make_env();
+    let (client, _, attestor, _) = setup(&env);
     let token = String::from_str(&env, "mock_token");
-    let issuer = Address::random(&env);
 
-    // Expect event
-    let topics = (symbol_short!("attestor"), symbol_short!("reg"));
-    env.events().publish_expect(&topics, &AttestorRegistered(attestor.clone()));
+    let events_before = env.events().all().len();
 
-    // Call
-    AnchorKitContract::register_attestor(&env, attestor, token, issuer);
+    client.register_attestor(&attestor, &token, &attestor);
+
+    assert_event_count(&env, events_before + 1);
+    assert_last_event(&env, symbol_short!("attestor"), symbol_short!("reg"));
 }
 
 #[test]
 fn test_revoke_attestor_emits_revoked_event() {
-    let env = Env::default();
-    env.mock_all_auths();
+    let env = make_env();
+    let (client, _, attestor, _) = setup(&env);
 
-    let attestor = Address::random(&env);
-    let token = String::from_str(&env, "mock_token");
-    let issuer = Address::random(&env);
+    let events_before = env.events().all().len();
 
-    // Register first
-    AnchorKitContract::register_attestor(&env, attestor.clone(), token, issuer);
+    client.revoke_attestor(&attestor);
 
-    // Expect event
-    let topics = (symbol_short!("attestor"), symbol_short!("revoked"));
-    env.events().publish_expect(&topics, &AttestorRevoked(attestor.clone()));
-
-    // Call
-    AnchorKitContract::revoke_attestor(&env, attestor);
+    assert_event_count(&env, events_before + 1);
+    assert_last_event(&env, symbol_short!("attestor"), symbol_short!("revoked"));
 }
 
 #[test]
 fn test_set_get_endpoint_happy_path() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
+    let env = make_env();
+    let (client, _, attestor, _) = setup(&env);
     let endpoint = String::from_str(&env, "https://example.com/api");
 
-    // Register attestor (admin auth mocked)
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock_token"), Address::random(&env));
+    client.set_endpoint(&attestor, &endpoint);
 
-    // Set endpoint
-    AnchorKitContract::set_endpoint(&env, attestor.clone(), endpoint.clone());
-
-    // Get endpoint
-    let retrieved = AnchorKitContract::get_endpoint(&env, attestor.clone());
+    let retrieved = client.get_endpoint(&attestor);
     assert_eq!(retrieved, endpoint);
 }
 
 #[test]
 #[should_panic(expected = "AttestorNotRegistered")]
 fn test_get_endpoint_not_registered() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
-    AnchorKitContract::get_endpoint(&env, attestor);
+    let env = make_env();
+    let (client, _, _, _) = setup(&env);
+    let unknown = Address::generate(&env);
+    client.get_endpoint(&unknown);
 }
 
 #[test]
 #[should_panic(expected = "AttestorNotRegistered")]
 fn test_set_endpoint_not_attestor() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
+    let env = make_env();
+    let (client, _, _, _) = setup(&env);
+    let unknown = Address::generate(&env);
     let endpoint = String::from_str(&env, "https://example.com");
-    AnchorKitContract::set_endpoint(&env, attestor, endpoint);
+    client.set_endpoint(&unknown, &endpoint);
 }
 
 #[test]
 #[should_panic(expected = "InvalidEndpointFormat")]
 fn test_set_endpoint_invalid_url() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock"), Address::random(&env));
-
+    let env = make_env();
+    let (client, _, attestor, _) = setup(&env);
     let invalid = String::from_str(&env, "http://invalid.com"); // HTTP
-    AnchorKitContract::set_endpoint(&env, attestor, invalid);
-}
-
-#[test]
-#[should_panic(expected = "Unauthorized")]
-fn test_set_endpoint_unauthorized() {
-    let env = Env::default();
-
-    let attestor = Address::random(&env);
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock"), Address::random(&env));
-
-    let endpoint = String::from_str(&env, "https://example.com");
-    let caller = Address::random(&env);
-    caller.require_auth(); // Mock auth for wrong caller
-
-    // Function requires attestor.require_auth(), so wrong caller panics on auth
-    env.budget().reset_unlimited();
-    // Note: testutils mock_all_auths needed for require_auth in tests
+    client.set_endpoint(&attestor, &invalid);
 }
 
 #[test]
 fn test_endpoint_updated_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let attestor = Address::random(&env);
+    let env = make_env();
+    let (client, _, attestor, _) = setup(&env);
     let endpoint = String::from_str(&env, "https://test.com");
 
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "token"), Address::random(&env));
+    let events_before = env.events().all().len();
 
-    // Expect event
-    let topics = (symbol_short!("endpoint"), symbol_short!("updated"));
-    env.events().publish_expect(&topics, &EndpointUpdated { attestor: attestor.clone(), endpoint: endpoint.clone() });
+    client.set_endpoint(&attestor, &endpoint);
 
-    // Calling set_endpoint should emit it
-    AnchorKitContract::set_endpoint(&env, attestor, endpoint.clone());
-    // Verify emitted (testutils check)
+    assert_event_count(&env, events_before + 1);
+    assert_last_event(&env, symbol_short!("endpoint"), symbol_short!("updated"));
 }
