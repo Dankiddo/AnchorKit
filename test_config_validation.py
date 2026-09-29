@@ -36,8 +36,9 @@ class ConfigValidationError(Exception):
 class ConfigValidator:
     """Validates AnchorKit configuration files"""
     
-    # Supported networks
-    VALID_NETWORKS = ['stellar-testnet', 'stellar-mainnet', 'stellar-futurenet', 'stellar-public']
+    # Supported networks — MUST match the `contract.network` and
+    # `deployment.network` enums in config_schema.json.
+    VALID_NETWORKS = ['stellar-testnet', 'stellar-mainnet', 'stellar-futurenet']
     
     # Supported roles for attestors
     VALID_ROLES = ['kyc-issuer', 'transfer-verifier', 'compliance-approver', 
@@ -663,6 +664,19 @@ class TestConfigValidation(unittest.TestCase):
         validator = ConfigValidator(config)
         self.assertFalse(validator.validate())
         self.assertTrue(any("network" in e.lower() for e in validator.get_errors()))
+
+    def test_stellar_public_not_in_valid_networks(self):
+        """stellar-public is NOT in config_schema.json's network enum and must be rejected.
+
+        config_schema.json defines contract.network and deployment.network as
+        ["stellar-testnet", "stellar-mainnet", "stellar-futurenet"]. This validator
+        must agree with the canonical schema, so "stellar-public" must fail.
+        """
+        config = {"contract": {"name": "test", "version": "1.0.0", "network": "stellar-public"}, "attestors": {"registry": [{"name": "test", "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", "endpoint": "https://example.com", "role": "attestor", "enabled": True}]}}
+        validator = ConfigValidator(config)
+        self.assertFalse(validator.validate(), "stellar-public should be rejected")
+        self.assertTrue(any("network" in e.lower() for e in validator.get_errors()))
+        self.assertNotIn("stellar-public", ConfigValidator.VALID_NETWORKS)
     
     # Invalid Stellar address tests
     def test_invalid_stellar_address_wrong_prefix(self):
